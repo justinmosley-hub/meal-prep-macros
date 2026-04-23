@@ -21,7 +21,7 @@ enum FoodAPIService {
         }
 
         // 2. Hit Open Food Facts API
-        guard let url = URL(string: "\(baseURL)/\(barcode)?fields=product_name,nutriments") else {
+        guard let url = URL(string: "\(baseURL)/\(barcode)?fields=product_name,serving_size,nutriments") else {
             return nil
         }
         let (data, response) = try await URLSession.shared.data(from: url)
@@ -32,18 +32,48 @@ enum FoodAPIService {
         let decoded = try JSONDecoder().decode(OFFResponse.self, from: data)
         guard decoded.status == 1, let product = decoded.product else { return nil }
 
-        let nutrition = NutritionInfo(
-            servingGrams: 100,
-            calories: product.nutriments.energyKcal100g ?? 0,
-            protein: product.nutriments.proteins100g ?? 0,
-            carbs: product.nutriments.carbohydrates100g ?? 0,
-            fat: product.nutriments.fat100g ?? 0
-        )
+        let nutrition = buildNutrition(from: product)
         return ScannedFood(
             name: product.productName?.isEmpty == false ? product.productName! : "Unknown Item",
             nutrition: nutrition,
             barcode: barcode
         )
+    }
+
+    // Use per-serving values when the API provides a parseable gram serving size;
+    // fall back to per-100g otherwise.
+    private static func buildNutrition(from product: OFFProduct) -> NutritionInfo {
+        let n = product.nutriments
+        if let servingStr = product.servingSize,
+           let servingGrams = parseGrams(from: servingStr),
+           servingGrams > 0,
+           let cal = n.energyKcalServing,
+           let pro = n.proteinsServing,
+           let carb = n.carbohydratesServing,
+           let fat = n.fatServing {
+            return NutritionInfo(
+                servingGrams: servingGrams,
+                calories: cal,
+                protein: pro,
+                carbs: carb,
+                fat: fat
+            )
+        }
+        // Fallback: per 100g
+        return NutritionInfo(
+            servingGrams: 100,
+            calories: n.energyKcal100g ?? 0,
+            protein: n.proteins100g ?? 0,
+            carbs: n.carbohydrates100g ?? 0,
+            fat: n.fat100g ?? 0
+        )
+    }
+
+    // Extracts the gram value from strings like "30g", "30 g", "1 serving (30g)", "1 oz (28g)"
+    private static func parseGrams(from string: String) -> Double? {
+        let pattern = /(\d+(?:\.\d+)?)\s*g/
+        guard let match = string.firstMatch(of: pattern) else { return nil }
+        return Double(match.1)
     }
 }
 
@@ -56,21 +86,33 @@ private struct OFFResponse: Decodable {
 
 private struct OFFProduct: Decodable {
     let productName: String?
+    let servingSize: String?
     let nutriments: OFFNutriments
 
     enum CodingKeys: String, CodingKey {
         case productName = "product_name"
+        case servingSize = "serving_size"
         case nutriments
     }
 }
 
 private struct OFFNutriments: Decodable {
+    // Per serving
+    let energyKcalServing: Double?
+    let proteinsServing: Double?
+    let carbohydratesServing: Double?
+    let fatServing: Double?
+    // Per 100g fallback
     let energyKcal100g: Double?
     let proteins100g: Double?
     let carbohydrates100g: Double?
     let fat100g: Double?
 
     enum CodingKeys: String, CodingKey {
+        case energyKcalServing = "energy-kcal_serving"
+        case proteinsServing = "proteins_serving"
+        case carbohydratesServing = "carbohydrates_serving"
+        case fatServing = "fat_serving"
         case energyKcal100g = "energy-kcal_100g"
         case proteins100g = "proteins_100g"
         case carbohydrates100g = "carbohydrates_100g"
